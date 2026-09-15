@@ -59,8 +59,11 @@ export function ChatApp({ currentUser, initialConversations }: { currentUser: Us
   const [showAdd, setShowAdd] = useState(false);
   const [showEmoji, setShowEmoji] = useState(false);
   const [peerTyping, setPeerTyping] = useState(false);
-  const messageEnd = useRef<HTMLDivElement>(null);
+  const mainRef = useRef<HTMLElement>(null);
+  const messageAreaRef = useRef<HTMLElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const nearBottomRef = useRef(true);
+  const prevActiveIdRef = useRef<string | null>(null);
   const activeRef = useRef<Conversation | null>(null);
   const typingChannel = useRef<any>(null);
   const typingResetTimer = useRef<number | undefined>(undefined);
@@ -103,6 +106,22 @@ export function ChatApp({ currentUser, initialConversations }: { currentUser: Us
     const timer = window.setInterval(() => { void supabase.rpc("touch_presence"); void refreshConversations(); }, 30_000);
     return () => window.clearInterval(timer);
   }, [supabase, refreshConversations]);
+
+  // Keep the composer visible above the on-screen keyboard: iOS/Android don't
+  // resize the fixed chat pane when the keyboard opens, so nudge it up using
+  // the visual viewport instead of letting it hide behind the keys.
+  useEffect(() => {
+    const vv = window.visualViewport;
+    if (!vv) return;
+    const apply = () => {
+      const offset = Math.max(0, window.innerHeight - vv.height);
+      if (mainRef.current) mainRef.current.style.bottom = offset > 2 ? `${offset}px` : "";
+    };
+    vv.addEventListener("resize", apply);
+    vv.addEventListener("scroll", apply);
+    apply();
+    return () => { vv.removeEventListener("resize", apply); vv.removeEventListener("scroll", apply); };
+  }, []);
 
   useEffect(() => { activeRef.current = active; }, [active]);
 
@@ -156,7 +175,29 @@ export function ChatApp({ currentUser, initialConversations }: { currentUser: Us
     void channel.send({ type: "broadcast", event: "typing", payload: { user: currentUser.id } });
   }
 
-  useEffect(() => { messageEnd.current?.scrollIntoView({ behavior: "smooth" }); }, [messages.length, active?.conversation_id]);
+  // Track whether the reader is near the bottom so we only auto-scroll when it
+  // won't yank the view away mid-read. Scroll the container directly instead of
+  // scrollIntoView, which can steal focus and dismiss the keyboard on mobile.
+  useEffect(() => {
+    const area = messageAreaRef.current;
+    if (!area) return;
+    const onScroll = () => {
+      nearBottomRef.current = area.scrollHeight - area.scrollTop - area.clientHeight < 140;
+    };
+    area.addEventListener("scroll", onScroll, { passive: true });
+    return () => area.removeEventListener("scroll", onScroll);
+  }, []);
+
+  useEffect(() => {
+    const area = messageAreaRef.current;
+    if (!area) return;
+    const openedNewChat = prevActiveIdRef.current !== active?.conversation_id;
+    if (active?.conversation_id) prevActiveIdRef.current = active.conversation_id;
+    if (openedNewChat || nearBottomRef.current) {
+      area.scrollTop = area.scrollHeight;
+      nearBottomRef.current = true;
+    }
+  }, [messages.length, active?.conversation_id]);
 
   async function findPerson() {
     setFinding(true); setSearchError(""); setFoundUser(null);
@@ -193,9 +234,12 @@ export function ChatApp({ currentUser, initialConversations }: { currentUser: Us
     if (!content || !active || sending) return;
     setSending(true); setDraft("");
     if (textareaRef.current) textareaRef.current.style.height = "auto";
+    // Keep the field focused so the mobile keyboard never collapses mid-chat.
+    requestAnimationFrame(() => textareaRef.current?.focus());
     const { data, error } = await supabase.from("messages").insert({ conversation_id: active.conversation_id, sender_id: currentUser.id, content }).select("id, conversation_id, sender_id, content, created_at, read_at").single();
     if (error) { setDraft(content); setSearchError(error.message); }
     else if (data) { setMessages(prev => [...prev, data as Message]); void refreshConversations(); }
+    requestAnimationFrame(() => textareaRef.current?.focus());
     setSending(false);
   }
 
@@ -253,7 +297,7 @@ export function ChatApp({ currentUser, initialConversations }: { currentUser: Us
         </div>
       </aside>
 
-      <main className="main">
+      <main className="main" ref={mainRef}>
         {activePerson ? (
           <>
             <header className="chat-header">
@@ -266,7 +310,7 @@ export function ChatApp({ currentUser, initialConversations }: { currentUser: Us
                 <button className="icon-button desktop-only" onClick={() => setActive(null)} title="Close chat"><X size={20} /></button>
               </div>
             </header>
-            <section className="message-area">
+            <section className="message-area" ref={messageAreaRef}>
               <div className="message-inner">
                 {messages.map((m, i) => {
                   const mine = m.sender_id === currentUser.id;
@@ -292,7 +336,6 @@ export function ChatApp({ currentUser, initialConversations }: { currentUser: Us
                 {peerTyping && (
                   <div className="message-row in"><div className="message-bubble typing-bubble"><i /><i /><i /></div></div>
                 )}
-                <div ref={messageEnd} />
               </div>
             </section>
             <div className="composer">
@@ -309,6 +352,9 @@ export function ChatApp({ currentUser, initialConversations }: { currentUser: Us
                     className="composer-input"
                     rows={1}
                     value={draft}
+                    enterKeyHint="send"
+                    autoComplete="off"
+                    autoCapitalize="sentences"
                     onChange={e => { setDraft(e.target.value); e.target.style.height = "auto"; e.target.style.height = `${Math.min(e.target.scrollHeight, 120)}px`; notifyTyping(); }}
                     onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void sendMessage(); } }}
                     placeholder="Type a message"

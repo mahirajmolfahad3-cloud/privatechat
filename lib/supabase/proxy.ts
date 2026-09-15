@@ -21,8 +21,8 @@ export async function updateSession(request: NextRequest) {
     },
   );
 
-  const { data: { claims } } = await supabase.auth.getClaims();
-  const isAuthed = Boolean(claims?.sub);
+  const { data } = await supabase.auth.getClaims();
+  const isAuthed = Boolean(data?.claims?.sub);
   const pathname = request.nextUrl.pathname;
   const isPublic = pathname === "/" || pathname.startsWith("/login") || pathname.startsWith("/signup") || pathname.startsWith("/auth");
 

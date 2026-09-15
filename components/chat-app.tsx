@@ -350,7 +350,7 @@ export function ChatApp({ currentUser, initialConversations }: { currentUser: Us
   const status = activePerson
     ? peerTyping
       ? "typing…"
-      : online(activePerson.other_last_seen_at) ? "online" : `last seen at ${timeOnly(activePerson.other_last_seen_at)}`
+      : online(activePerson.other_last_seen_at) ? "Active" : `last seen at ${timeOnly(activePerson.other_last_seen_at)}`
     : "";
 
   return (
@@ -401,7 +401,7 @@ export function ChatApp({ currentUser, initialConversations }: { currentUser: Us
               <button className="icon-button mobile-only" onClick={() => setActive(null)} aria-label="Back"><ArrowLeft size={22} /></button>
               <div className="chat-person">
                 <div className="avatar">{initials(activePerson.other_display_name)}{online(activePerson.other_last_seen_at) && <span className="presence-dot" />}</div>
-                <div className="person-copy"><strong>{activePerson.other_display_name}</strong><span className={`status ${peerTyping ? "typing" : ""}`}>{status}</span></div>
+                <div className="person-copy"><strong>{activePerson.other_display_name}</strong><span className={`status ${peerTyping ? "typing" : online(activePerson.other_last_seen_at) ? "active" : ""}`}>{status}</span></div>
               </div>
               <div className="header-actions">
                 <button className="icon-button desktop-only" onClick={() => setActive(null)} title="Close chat"><X size={20} /></button>

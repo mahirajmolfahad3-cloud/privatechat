@@ -32,6 +32,16 @@ function formatTime(value: string | null) {
   return date.toLocaleDateString([], { month: "short", day: "numeric" });
 }
 function timeOnly(value: string) { return new Date(value).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }); }
+function lastSeenLabel(value: string) {
+  const date = new Date(value);
+  const now = new Date();
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const diff = Math.floor((startOfToday.getTime() - new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime()) / 86_400_000);
+  const time = timeOnly(value);
+  if (diff === 0) return `last seen today at ${time}`;
+  if (diff === 1) return `last seen yesterday at ${time}`;
+  return `last seen on ${date.toLocaleDateString([], { day: "numeric", month: "short", year: "numeric" })} at ${time}`;
+}
 function online(lastSeen: string) { return Date.now() - new Date(lastSeen).getTime() < 70_000; }
 function dayKey(value: string) { return new Date(value).toDateString(); }
 function dayLabel(value: string) {
@@ -418,7 +428,7 @@ export function ChatApp({ currentUser, initialConversations }: { currentUser: Us
   const status = activePerson
     ? peerTyping
       ? "typing…"
-      : online(activePerson.other_last_seen_at) ? "Active" : `last seen at ${timeOnly(activePerson.other_last_active_at)}`
+      : online(activePerson.other_last_seen_at) ? "Active" : lastSeenLabel(activePerson.other_last_active_at)
     : "";
 
   return (

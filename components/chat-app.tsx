@@ -65,20 +65,29 @@ export function ChatApp({ currentUser, initialConversations }: { currentUser: Us
     return () => window.clearInterval(timer);
   }, [supabase]);
 
+  const activeRef = useRef<Conversation | null>(null);
+  useEffect(() => { activeRef.current = active; }, [active]);
+
+  // Global inbox channel: one subscription for ALL of the user's conversations.
+  // RLS on `messages` means Supabase only pushes rows from conversations this
+  // user is a member of, so a new incoming chat shows up live in the sidebar
+  // even when it has never been opened before.
   useEffect(() => {
-    if (!active) return;
-    const channel = supabase.channel(`conversation:${active.conversation_id}`)
-      .on("postgres_changes", { event: "INSERT", schema: "public", table: "messages", filter: `conversation_id=eq.${active.conversation_id}` }, payload => {
+    const channel = supabase.channel("inbox")
+      .on("postgres_changes", { event: "INSERT", schema: "public", table: "messages" }, payload => {
         const incoming = payload.new as Message;
-        setMessages(prev => prev.some(m => m.id === incoming.id) ? prev : [...prev, incoming]);
-        if (incoming.sender_id !== currentUser.id) {
-          void supabase.rpc("mark_conversation_read", { p_conversation_id: active.conversation_id });
+        const current = activeRef.current;
+        if (current && incoming.conversation_id === current.conversation_id) {
+          setMessages(prev => prev.some(m => m.id === incoming.id) ? prev : [...prev, incoming]);
+          if (incoming.sender_id !== currentUser.id) {
+            void supabase.rpc("mark_conversation_read", { p_conversation_id: current.conversation_id });
+          }
         }
         void refreshConversations();
       })
       .subscribe();
     return () => { void supabase.removeChannel(channel); };
-  }, [active, currentUser.id, refreshConversations, supabase]);
+  }, [currentUser.id, refreshConversations, supabase]);
 
   useEffect(() => { messageEnd.current?.scrollIntoView({ behavior: "smooth" }); }, [messages.length, active?.conversation_id]);
 
@@ -107,10 +116,9 @@ export function ChatApp({ currentUser, initialConversations }: { currentUser: Us
       last_message_at: null,
       unread_count: 0,
     };
-    await refreshConversations();
-    const latest = conversations.find(c => c.conversation_id === data) ?? conversation;
     setShowAdd(false); setRecipientId(""); setFoundUser(null); setSearchError("");
-    await openConversation({ ...latest, ...conversation });
+    void refreshConversations();
+    await openConversation(conversation);
   }
 
   async function sendMessage() {

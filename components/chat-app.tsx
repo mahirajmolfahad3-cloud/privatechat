@@ -20,7 +20,7 @@ type Conversation = {
 type Message = { id: string; conversation_id: string; sender_id: string; content: string; created_at: string; read_at: string | null; reply_to_id: string | null; edited_at: string | null };
 type FoundUser = Pick<UserProfile, "id" | "chat_id" | "display_name" | "last_seen_at">;
 
-const EMOJIS = ["😀", "😂", "🥲", "😍", "😎", "🤔", "👍", "🙏", "❤️", "🔥", "🎉", "😭", "😮", "😅", "😴", "🤝", "💯", "👀", "🥳", "✨"];
+const EMOJIS = ["😘", "😍", "😏", "🥰", "💋", "😉", "😜", "❤️🔥", "😈", "💘", "💕", "🌹", "😳", "🫦", "🤭", "🥵", "👀", "🤤", "🤗", "😅"];
 
 function initials(name: string) { return name.trim().split(/\s+/).slice(0, 2).map(x => x[0]).join("").toUpperCase() || "?"; }
 function formatTime(value: string | null) {

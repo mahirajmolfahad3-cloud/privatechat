@@ -6,19 +6,20 @@ import {
   ArrowLeft, Check, CheckCheck, Copy, LogOut, MessageCircle, Moon, Pencil, Plus, Search, Send, Smile, Sun, X,
 } from "lucide-react";
 
-type UserProfile = { id: string; chat_id: string; display_name: string; last_seen_at: string };
+type UserProfile = { id: string; chat_id: string; display_name: string; last_seen_at: string; last_active_at: string };
 type Conversation = {
   conversation_id: string;
   other_user_id: string;
   other_chat_id: string;
   other_display_name: string;
   other_last_seen_at: string;
+  other_last_active_at: string;
   last_message: string | null;
   last_message_at: string | null;
   unread_count: number;
 };
 type Message = { id: string; conversation_id: string; sender_id: string; content: string; created_at: string; read_at: string | null; reply_to_id: string | null; edited_at: string | null };
-type FoundUser = Pick<UserProfile, "id" | "chat_id" | "display_name" | "last_seen_at">;
+type FoundUser = Pick<UserProfile, "id" | "chat_id" | "display_name" | "last_seen_at" | "last_active_at">;
 
 const EMOJIS = ["😘", "😍", "😏", "🥰", "💋", "😉", "😜", "❤️🔥", "😈", "💘", "💕", "🌹", "😳", "🫦", "🤭", "🥵", "👀", "🤤", "🤗", "😅"];
 
@@ -119,6 +120,7 @@ export function ChatApp({ currentUser, initialConversations }: { currentUser: Us
     const { data } = await supabase.from("messages").select("id, conversation_id, sender_id, content, created_at, read_at, reply_to_id, edited_at").eq("conversation_id", conversation.conversation_id).order("created_at", { ascending: true });
     setMessages((data ?? []) as Message[]);
     await supabase.rpc("mark_conversation_read", { p_conversation_id: conversation.conversation_id });
+    void supabase.rpc("touch_activity");
     setConversations(prev => prev.map(x => x.conversation_id === conversation.conversation_id ? { ...x, unread_count: 0 } : x));
   }, [supabase]);
 
@@ -152,11 +154,10 @@ export function ChatApp({ currentUser, initialConversations }: { currentUser: Us
   // instead of waiting for the 30s conversation poll.
   useEffect(() => {
     const channel = supabase.channel("presence-watch")
-      .on("postgres_changes", { event: "UPDATE", schema: "public", table: "profiles", filter: `id=neq.${currentUser.id}` }, payload => {
+.on("postgres_changes", { event: "UPDATE", schema: "public", table: "profiles", filter: `id=neq.${currentUser.id}` }, payload => {
         const profile = payload.new as UserProfile;
-        if (!profile.last_seen_at) return;
-        setConversations(prev => prev.map(c => c.other_user_id === profile.id ? { ...c, other_last_seen_at: profile.last_seen_at } : c));
-        setActive(prev => prev && prev.other_user_id === profile.id ? { ...prev, other_last_seen_at: profile.last_seen_at } : prev);
+        setConversations(prev => prev.map(c => c.other_user_id === profile.id ? { ...c, other_last_seen_at: profile.last_seen_at, other_last_active_at: profile.last_active_at } : c));
+        setActive(prev => prev && prev.other_user_id === profile.id ? { ...prev, other_last_seen_at: profile.last_seen_at, other_last_active_at: profile.last_active_at } : prev);
       })
       .subscribe();
     return () => { void supabase.removeChannel(channel); };
@@ -219,6 +220,7 @@ export function ChatApp({ currentUser, initialConversations }: { currentUser: Us
     if (now - lastTypingSent.current < 1800) return;
     lastTypingSent.current = now;
     void channel.send({ type: "broadcast", event: "typing", payload: { user: currentUser.id } });
+    void supabase.rpc("touch_activity");
   }
 
   // Track whether the reader is near the bottom so we only auto-scroll when it
@@ -266,6 +268,7 @@ export function ChatApp({ currentUser, initialConversations }: { currentUser: Us
       other_chat_id: foundUser.chat_id,
       other_display_name: foundUser.display_name,
       other_last_seen_at: foundUser.last_seen_at,
+      other_last_active_at: foundUser.last_active_at,
       last_message: null,
       last_message_at: null,
       unread_count: 0,
@@ -289,7 +292,7 @@ export function ChatApp({ currentUser, initialConversations }: { currentUser: Us
       reply_to_id: replyingTo?.id ?? null,
     }).select("id, conversation_id, sender_id, content, created_at, read_at, reply_to_id, edited_at").single();
     if (error) { setDraft(content); setSearchError(error.message); }
-    else if (data) { setMessages(prev => [...prev, data as Message]); setReplyingTo(null); void refreshConversations(); }
+    else if (data) { setMessages(prev => [...prev, data as Message]); setReplyingTo(null); void refreshConversations(); void supabase.rpc("touch_activity"); }
     requestAnimationFrame(() => textareaRef.current?.focus());
     setSending(false);
   }
@@ -350,7 +353,7 @@ export function ChatApp({ currentUser, initialConversations }: { currentUser: Us
   const status = activePerson
     ? peerTyping
       ? "typing…"
-      : online(activePerson.other_last_seen_at) ? "Active" : `last seen at ${timeOnly(activePerson.other_last_seen_at)}`
+      : online(activePerson.other_last_seen_at) ? "Active" : `last seen at ${timeOnly(activePerson.other_last_active_at)}`
     : "";
 
   return (

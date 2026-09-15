@@ -14,6 +14,7 @@ create table if not exists public.profiles (
   chat_id text not null unique default upper(substr(replace(gen_random_uuid()::text, '-', ''), 1, 10)),
   display_name text not null default 'New user',
   last_seen_at timestamptz not null default now(),
+  last_active_at timestamptz not null default now(),
   created_at timestamptz not null default now(),
   constraint profiles_display_name_length check (char_length(display_name) between 1 and 40)
 );
@@ -43,6 +44,7 @@ create table if not exists public.messages (
 -- Idempotent migrations so re-running this file upgrades existing databases.
 alter table public.messages add column if not exists reply_to_id uuid references public.messages(id) on delete set null;
 alter table public.messages add column if not exists edited_at timestamptz;
+alter table public.profiles add column if not exists last_active_at timestamptz not null default now();
 
 create index if not exists messages_conversation_created_idx on public.messages(conversation_id, created_at);
 create index if not exists messages_reply_to_idx on public.messages(reply_to_id);
@@ -144,11 +146,11 @@ grant update (content, edited_at) on public.messages to authenticated;
 
 -- Find a person by their public Ping ID without exposing the entire profiles table.
 create or replace function public.find_user_by_chat_id(p_chat_id text)
-returns table (id uuid, chat_id text, display_name text, last_seen_at timestamptz)
+returns table (id uuid, chat_id text, display_name text, last_seen_at timestamptz, last_active_at timestamptz)
 language sql
 security definer set search_path = public
 as $$
-  select p.id, p.chat_id, p.display_name, p.last_seen_at
+  select p.id, p.chat_id, p.display_name, p.last_seen_at, p.last_active_at
   from public.profiles p
   where upper(p.chat_id) = upper(btrim(p_chat_id))
     and p.id <> (select auth.uid())
@@ -197,6 +199,7 @@ returns table (
   other_chat_id text,
   other_display_name text,
   other_last_seen_at timestamptz,
+  other_last_active_at timestamptz,
   last_message text,
   last_message_at timestamptz,
   unread_count bigint
@@ -210,6 +213,7 @@ as $$
     other.chat_id,
     other.display_name,
     other.last_seen_at,
+    other.last_active_at,
     lm.content,
     lm.created_at,
     coalesce(unread.count, 0)
@@ -267,6 +271,19 @@ as $$
 $$;
 
 grant execute on function public.touch_presence() to authenticated;
+
+-- Marks the last time the user actually used the app (sent a message, opened a
+-- chat, typed). "last seen at" is shown from this, while last_seen_at (the 30s
+-- heartbeat) only drives the green "Active" indicator.
+create or replace function public.touch_activity()
+returns void
+language sql
+security definer set search_path = public
+as $$
+  update public.profiles set last_active_at = now() where id = (select auth.uid());
+$$;
+
+grant execute on function public.touch_activity() to authenticated;
 
 -- Needed for Supabase Realtime Postgres Changes. Make this idempotent for re-running the SQL file.
 do $$

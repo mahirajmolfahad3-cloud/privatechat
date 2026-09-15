@@ -12,6 +12,9 @@ export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,
   viewportFit: "cover",
+  // Resize the layout viewport when the on-screen keyboard opens so the
+  // composer moves up natively and smoothly (supported in Chrome/Android 108+).
+  interactiveWidget: "resizes-content",
   themeColor: "#00a884",
 };
 

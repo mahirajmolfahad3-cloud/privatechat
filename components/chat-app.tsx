@@ -55,7 +55,6 @@ export function ChatApp({ currentUser, initialConversations }: { currentUser: Us
   const [recipientId, setRecipientId] = useState("");
   const [foundUser, setFoundUser] = useState<FoundUser | null>(null);
   const [finding, setFinding] = useState(false);
-  const [sending, setSending] = useState(false);
   const [searchError, setSearchError] = useState("");
   const [showAdd, setShowAdd] = useState(false);
   const [showEmoji, setShowEmoji] = useState(false);
@@ -68,7 +67,6 @@ export function ChatApp({ currentUser, initialConversations }: { currentUser: Us
   const messageAreaRef = useRef<HTMLElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const editTextareaRef = useRef<HTMLTextAreaElement>(null);
-  const nearBottomRef = useRef(true);
   const prevActiveIdRef = useRef<string | null>(null);
   const messagesRef = useRef<Message[]>([]);
   const refreshTimer = useRef<number | undefined>(undefined);
@@ -120,6 +118,9 @@ export function ChatApp({ currentUser, initialConversations }: { currentUser: Us
     const { data } = await supabase.from("messages").select("id, conversation_id, sender_id, content, created_at, read_at, reply_to_id, edited_at").eq("conversation_id", conversation.conversation_id).order("created_at", { ascending: true });
     setMessages((data ?? []) as Message[]);
     await supabase.rpc("mark_conversation_read", { p_conversation_id: conversation.conversation_id });
+    // Broadcast the read receipt after a short delay so the typing channel has
+    // time to subscribe (setActive just ran above, the effect fires next tick).
+    setTimeout(() => announceRead(conversation.conversation_id), 400);
     void supabase.rpc("touch_activity");
     setConversations(prev => prev.map(x => x.conversation_id === conversation.conversation_id ? { ...x, unread_count: 0 } : x));
   }, [supabase]);
@@ -131,15 +132,18 @@ export function ChatApp({ currentUser, initialConversations }: { currentUser: Us
     return () => window.clearInterval(timer);
   }, [supabase, refreshConversations]);
 
-  // Keep the composer visible above the on-screen keyboard: iOS/Android don't
-  // resize the fixed chat pane when the keyboard opens, so nudge it up using
-  // the visual viewport instead of letting it hide behind the keys.
+  // Keep the composer visible above the on-screen keyboard. On Android the
+  // viewport meta uses interactive-widget=resizes-content so the layout resizes
+  // natively (this handler becomes a no-op there). iOS doesn't resize, so nudge
+  // the fixed pane up using the visual viewport — and re-pin the document to
+  // the top, because iOS scrolls the page itself when the keyboard opens.
   useEffect(() => {
     const vv = window.visualViewport;
     if (!vv) return;
     const apply = () => {
-      const offset = Math.max(0, window.innerHeight - vv.height);
+      const offset = Math.max(0, window.innerHeight - vv.height - vv.offsetTop);
       if (mainRef.current) mainRef.current.style.bottom = offset > 2 ? `${offset}px` : "";
+      if (offset > 2 && window.scrollY !== 0) window.scrollTo(0, 0);
     };
     vv.addEventListener("resize", apply);
     vv.addEventListener("scroll", apply);
@@ -176,6 +180,7 @@ export function ChatApp({ currentUser, initialConversations }: { currentUser: Us
           setMessages(prev => prev.some(m => m.id === incoming.id) ? prev : [...prev, incoming]);
           if (incoming.sender_id !== currentUser.id) {
             void supabase.rpc("mark_conversation_read", { p_conversation_id: current.conversation_id });
+            announceRead(current.conversation_id);
           }
         }
         void refreshConversations();
@@ -204,6 +209,14 @@ export function ChatApp({ currentUser, initialConversations }: { currentUser: Us
           typingResetTimer.current = window.setTimeout(() => setPeerTyping(false), 3000);
         }
       })
+      .on("broadcast", { event: "messages-read" }, ({ payload }: { payload: any }) => {
+        if (payload?.user && payload.user !== currentUser.id) {
+          // The other person opened or read the chat — flip our sent ticks to
+          // blue checkmarks immediately instead of waiting for the next poll.
+          const now = new Date().toISOString();
+          setMessages(prev => prev.map(m => m.sender_id === currentUser.id && !m.read_at ? { ...m, read_at: now } : m));
+        }
+      })
       .subscribe();
     typingChannel.current = channel;
     return () => {
@@ -212,6 +225,15 @@ export function ChatApp({ currentUser, initialConversations }: { currentUser: Us
       setPeerTyping(false);
     };
   }, [active?.conversation_id, currentUser.id, supabase]);
+
+  // Broadcast that messages have been read in this conversation so the sender
+  // sees blue ticks live (the SECURITY DEFINER mark_conversation_read RPC
+  // doesn't trigger reliable postgres_changes UPDATE events for the other client).
+  function announceRead(conversationId: string) {
+    const channel = typingChannel.current;
+    if (!channel) return;
+    void channel.send({ type: "broadcast", event: "messages-read", payload: { conversation_id: conversationId, user: currentUser.id } });
+  }
 
   function notifyTyping() {
     const channel = typingChannel.current;
@@ -223,29 +245,44 @@ export function ChatApp({ currentUser, initialConversations }: { currentUser: Us
     void supabase.rpc("touch_activity");
   }
 
-  // Track whether the reader is near the bottom so we only auto-scroll when it
-  // won't yank the view away mid-read. Scroll the container directly instead of
-  // scrollIntoView, which can steal focus and dismiss the keyboard on mobile.
+  // Track whether the reader is pinned to the bottom so we only auto-scroll
+  // when it won't yank the view away mid-read. Scroll the container directly
+  // instead of scrollIntoView, which can steal focus and dismiss the keyboard.
+  const pinnedRef = useRef(true);
   useEffect(() => {
     const area = messageAreaRef.current;
     if (!area) return;
     const onScroll = () => {
-      nearBottomRef.current = area.scrollHeight - area.scrollTop - area.clientHeight < 140;
+      pinnedRef.current = area.scrollHeight - area.scrollTop - area.clientHeight < 140;
     };
     area.addEventListener("scroll", onScroll, { passive: true });
     return () => area.removeEventListener("scroll", onScroll);
   }, []);
 
-  useEffect(() => {
+  const scrollToBottom = useCallback(() => {
     const area = messageAreaRef.current;
     if (!area) return;
+    area.scrollTop = area.scrollHeight;
+    pinnedRef.current = true;
+  }, []);
+
+  useEffect(() => {
     const openedNewChat = prevActiveIdRef.current !== active?.conversation_id;
     if (active?.conversation_id) prevActiveIdRef.current = active.conversation_id;
-    if (openedNewChat || nearBottomRef.current) {
-      area.scrollTop = area.scrollHeight;
-      nearBottomRef.current = true;
-    }
-  }, [messages.length, active?.conversation_id]);
+    if (openedNewChat || pinnedRef.current) scrollToBottom();
+  }, [messages.length, active?.conversation_id, scrollToBottom]);
+
+  // When the keyboard opens/closes the message pane shrinks or grows — re-stick
+  // to the bottom so the newest messages stay in view instead of jumping away.
+  useEffect(() => {
+    const vv = window.visualViewport;
+    if (!vv) return;
+    const onResize = () => {
+      if (pinnedRef.current) requestAnimationFrame(scrollToBottom);
+    };
+    vv.addEventListener("resize", onResize);
+    return () => vv.removeEventListener("resize", onResize);
+  }, [scrollToBottom]);
 
   async function findPerson() {
     setFinding(true); setSearchError(""); setFoundUser(null);
@@ -280,8 +317,23 @@ export function ChatApp({ currentUser, initialConversations }: { currentUser: Us
 
   async function sendMessage() {
     const content = draft.trim();
-    if (!content || !active || sending) return;
-    setSending(true); setDraft("");
+    if (!content || !active) return;
+    // Optimistic insert: show the message immediately so fast consecutive
+    // sends feel instant and the send button never flickers grey per message.
+    const tempId = `temp-${crypto.randomUUID()}`;
+    const optimistic: Message = {
+      id: tempId,
+      conversation_id: active.conversation_id,
+      sender_id: currentUser.id,
+      content,
+      created_at: new Date().toISOString(),
+      read_at: null,
+      reply_to_id: replyingTo?.id ?? null,
+      edited_at: null,
+    };
+    setMessages(prev => [...prev, optimistic]);
+    setReplyingTo(null);
+    setDraft("");
     if (textareaRef.current) textareaRef.current.style.height = "auto";
     // Keep the field focused so the mobile keyboard never collapses mid-chat.
     requestAnimationFrame(() => textareaRef.current?.focus());
@@ -289,12 +341,25 @@ export function ChatApp({ currentUser, initialConversations }: { currentUser: Us
       conversation_id: active.conversation_id,
       sender_id: currentUser.id,
       content,
-      reply_to_id: replyingTo?.id ?? null,
+      reply_to_id: optimistic.reply_to_id,
     }).select("id, conversation_id, sender_id, content, created_at, read_at, reply_to_id, edited_at").single();
-    if (error) { setDraft(content); setSearchError(error.message); }
-    else if (data) { setMessages(prev => [...prev, data as Message]); setReplyingTo(null); void refreshConversations(); void supabase.rpc("touch_activity"); }
+    if (error) {
+      // Roll back the optimistic bubble and restore the draft.
+      setMessages(prev => prev.filter(m => m.id !== tempId));
+      setDraft(content);
+      setReplyingTo(optimistic.reply_to_id ? messagesRef.current.find(m => m.id === optimistic.reply_to_id) ?? null : null);
+      setSearchError(error.message);
+    } else if (data) {
+      const saved = data as Message;
+      // Swap the temp bubble for the real row (or drop it if realtime already
+      // delivered the authoritative copy).
+      setMessages(prev => prev.some(m => m.id === saved.id)
+        ? prev.filter(m => m.id !== tempId)
+        : prev.map(m => m.id === tempId ? saved : m));
+      void refreshConversations();
+      void supabase.rpc("touch_activity");
+    }
     requestAnimationFrame(() => textareaRef.current?.focus());
-    setSending(false);
   }
 
   function copyMessage() {
@@ -469,18 +534,20 @@ export function ChatApp({ currentUser, initialConversations }: { currentUser: Us
                   {EMOJIS.map(e => <button key={e} type="button" onClick={() => { setDraft(d => d + e); textareaRef.current?.focus(); }}>{e}</button>)}
                 </div>
               )}
-              {!editingId && replyingTo && (
-                <div className="reply-preview">
-                  <div className="reply-preview-copy">
-                    <span className="reply-owner">Replying to {replyingTo.sender_id === currentUser.id ? "yourself" : activePerson?.other_display_name}</span>
-                    <p>{replyingTo.content}</p>
+              <div className={`reply-slot ${!editingId && replyingTo ? "open" : ""}`}>
+                {!editingId && replyingTo && (
+                  <div className="reply-preview">
+                    <div className="reply-preview-copy">
+                      <span className="reply-owner">Replying to {replyingTo.sender_id === currentUser.id ? "yourself" : activePerson?.other_display_name}</span>
+                      <p>{replyingTo.content}</p>
+                    </div>
+                    <button type="button" className="icon-button" onPointerDown={e => e.preventDefault()} onClick={() => setReplyingTo(null)} aria-label="Cancel reply"><X size={16} /></button>
                   </div>
-                  <button type="button" className="icon-button" onClick={() => setReplyingTo(null)} aria-label="Cancel reply"><X size={16} /></button>
-                </div>
-              )}
+                )}
+              </div>
               {editingId ? (
                 <form className="composer-inner" onSubmit={e => { e.preventDefault(); void saveEdit(); }}>
-                  <button type="button" className="icon-button" onClick={cancelEdit} aria-label="Cancel edit" title="Cancel editing"><X size={22} /></button>
+                  <button type="button" className="icon-button" onPointerDown={e => e.preventDefault()} onClick={cancelEdit} aria-label="Cancel edit" title="Cancel editing"><X size={22} /></button>
                   <div className="composer-bar">
                     <textarea
                       ref={editTextareaRef}
@@ -496,11 +563,11 @@ export function ChatApp({ currentUser, initialConversations }: { currentUser: Us
                       autoFocus
                     />
                   </div>
-                  <button type="submit" className="send" disabled={!editingText.trim()} aria-label="Save edit"><Check size={20} /></button>
+                  <button type="submit" className="send" disabled={!editingText.trim()} onPointerDown={e => e.preventDefault()} aria-label="Save edit"><Check size={20} /></button>
                 </form>
               ) : (
                 <form className="composer-inner" onSubmit={e => { e.preventDefault(); void sendMessage(); }}>
-                  <button type="button" className="icon-button" onClick={() => setShowEmoji(v => !v)} aria-label="Emoji" title="Emoji"><Smile size={24} /></button>
+                  <button type="button" className="icon-button" onPointerDown={e => e.preventDefault()} onClick={() => setShowEmoji(v => !v)} aria-label="Emoji" title="Emoji"><Smile size={24} /></button>
                   <div className="composer-bar">
                     <textarea
                       ref={textareaRef}
@@ -516,7 +583,7 @@ export function ChatApp({ currentUser, initialConversations }: { currentUser: Us
                       maxLength={4000}
                     />
                   </div>
-                  <button className="send" disabled={!draft.trim() || sending} aria-label="Send"><Send size={20} /></button>
+                  <button className="send" disabled={!draft.trim()} onPointerDown={e => e.preventDefault()} aria-label="Send"><Send size={20} /></button>
                 </form>
               )}
             </div>

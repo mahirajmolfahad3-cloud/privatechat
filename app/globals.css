@@ -65,7 +65,7 @@
 
 * { box-sizing: border-box; }
 html, body { margin: 0; padding: 0; height: 100%; background: var(--bg); color: var(--text); }
-body { font-family: "Segoe UI", Helvetica, system-ui, -apple-system, sans-serif; font-size: 14px; -webkit-font-smoothing: antialiased; overscroll-behavior-y: none; }
+body { font-family: "Segoe UI", Helvetica, system-ui, -apple-system, sans-serif; font-size: 14px; -webkit-font-smoothing: antialiased; overscroll-behavior-y: none; touch-action: manipulation; }
 button, input, textarea { font: inherit; color: inherit; }
 button { cursor: pointer; touch-action: manipulation; }
 html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
@@ -196,6 +196,12 @@ a { color: inherit; text-decoration: none; }
 .msg-action.accent { background: var(--accent-soft); color: var(--accent-2); }
 .msg-action.accent:hover { background: rgba(0, 168, 132, .22); }
 
+/* Collapsible slot so the reply preview appears/disappears without shoving the
+   composer up and down while the keyboard is open. */
+.reply-slot { display: grid; grid-template-rows: 0fr; transition: grid-template-rows .18s ease; }
+.reply-slot.open { grid-template-rows: 1fr; margin-bottom: 6px; }
+.reply-slot .reply-preview { min-height: 0; overflow: hidden; margin: 0; }
+
 .reply-preview { display: flex; align-items: center; gap: 10px; max-width: 900px; margin: 0 auto 6px; padding: 8px 12px; background: var(--panel-2); border-left: 3px solid var(--accent); border-radius: 10px; }
 .reply-preview-copy { flex: 1; min-width: 0; }
 .reply-preview-copy .reply-owner { display: block; }
@@ -217,7 +223,7 @@ a { color: inherit; text-decoration: none; }
 /* ---------- Responsive: mobile = single pane, desktop = two panes ---------- */
 .desktop-only { display: none; }
 @media (max-width: 899.5px) {
-  .main { position: fixed; inset: 0; z-index: 40; transform: translateX(103%); transition: transform .26s ease; }
+  .main { position: fixed; inset: 0; z-index: 40; transform: translateX(103%); transition: transform .26s ease, bottom .12s ease-out; }
   .chat-app.chat-open .main { transform: translateX(0); }
   /* 16px inputs stop iOS from auto-zooming into fields on focus. */
   .input, .search-input, .composer-input { font-size: 16px; }

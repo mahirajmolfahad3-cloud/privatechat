@@ -278,3 +278,15 @@ begin
     alter publication supabase_realtime add table public.messages;
   end if;
 end $$;
+
+-- Profiles are published so presence changes (last_seen_at) stream in realtime.
+-- RLS on profiles keeps each client from seeing anyone except their contacts.
+do $$
+begin
+  if not exists (
+    select 1 from pg_publication_tables
+    where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = 'profiles'
+  ) then
+    alter publication supabase_realtime add table public.profiles;
+  end if;
+end $$;

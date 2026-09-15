@@ -147,6 +147,21 @@ export function ChatApp({ currentUser, initialConversations }: { currentUser: Us
 
   useEffect(() => { activeRef.current = active; }, [active]);
 
+  // Realtime presence: when the other person's heartbeat refreshes their
+  // last_seen_at, surface it live in the sidebar and the open chat header
+  // instead of waiting for the 30s conversation poll.
+  useEffect(() => {
+    const channel = supabase.channel("presence-watch")
+      .on("postgres_changes", { event: "UPDATE", schema: "public", table: "profiles", filter: `id=neq.${currentUser.id}` }, payload => {
+        const profile = payload.new as UserProfile;
+        if (!profile.last_seen_at) return;
+        setConversations(prev => prev.map(c => c.other_user_id === profile.id ? { ...c, other_last_seen_at: profile.last_seen_at } : c));
+        setActive(prev => prev && prev.other_user_id === profile.id ? { ...prev, other_last_seen_at: profile.last_seen_at } : prev);
+      })
+      .subscribe();
+    return () => { void supabase.removeChannel(channel); };
+  }, [supabase, currentUser.id]);
+
   // Global inbox channel: one subscription for ALL of the user's conversations.
   // RLS on `messages` means Supabase only pushes rows from conversations this
   // user is a member of, so a new incoming chat shows up live in the sidebar

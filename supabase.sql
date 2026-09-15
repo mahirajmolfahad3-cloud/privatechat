@@ -32,13 +32,20 @@ create table if not exists public.messages (
   id uuid primary key default gen_random_uuid(),
   conversation_id uuid not null references public.conversations(id) on delete cascade,
   sender_id uuid not null references public.profiles(id) on delete cascade,
+  reply_to_id uuid references public.messages(id) on delete set null,
   content text not null,
   created_at timestamptz not null default now(),
   read_at timestamptz,
+  edited_at timestamptz,
   constraint messages_content_length check (char_length(btrim(content)) between 1 and 4000)
 );
 
+-- Idempotent migrations so re-running this file upgrades existing databases.
+alter table public.messages add column if not exists reply_to_id uuid references public.messages(id) on delete set null;
+alter table public.messages add column if not exists edited_at timestamptz;
+
 create index if not exists messages_conversation_created_idx on public.messages(conversation_id, created_at);
+create index if not exists messages_reply_to_idx on public.messages(reply_to_id);
 create index if not exists conversations_user_a_idx on public.conversations(user_a);
 create index if not exists conversations_user_b_idx on public.conversations(user_b);
 create index if not exists profiles_chat_id_idx on public.profiles(chat_id);
@@ -121,6 +128,17 @@ with check (
       and (select auth.uid()) in (c.user_a, c.user_b)
   )
 );
+
+-- Users may edit only their own messages, and only the text/edited_at columns.
+drop policy if exists messages_update_own on public.messages;
+create policy messages_update_own
+on public.messages for update
+to authenticated
+using (sender_id = (select auth.uid()))
+with check (sender_id = (select auth.uid()));
+
+revoke update on public.messages from authenticated;
+grant update (content, edited_at) on public.messages to authenticated;
 
 -- Read state is updated only through the SECURITY DEFINER mark_conversation_read() function.
 

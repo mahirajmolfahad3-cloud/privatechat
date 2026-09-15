@@ -3,7 +3,7 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 import {
-  ArrowLeft, Check, CheckCheck, Copy, LogOut, MessageCircle, Moon, Plus, Search, Send, Smile, Sun, X,
+  ArrowLeft, Check, CheckCheck, Copy, LogOut, MessageCircle, Moon, Pencil, Plus, Search, Send, Smile, Sun, X,
 } from "lucide-react";
 
 type UserProfile = { id: string; chat_id: string; display_name: string; last_seen_at: string };
@@ -17,7 +17,7 @@ type Conversation = {
   last_message_at: string | null;
   unread_count: number;
 };
-type Message = { id: string; conversation_id: string; sender_id: string; content: string; created_at: string; read_at: string | null };
+type Message = { id: string; conversation_id: string; sender_id: string; content: string; created_at: string; read_at: string | null; reply_to_id: string | null; edited_at: string | null };
 type FoundUser = Pick<UserProfile, "id" | "chat_id" | "display_name" | "last_seen_at">;
 
 const EMOJIS = ["😀", "😂", "🥲", "😍", "😎", "🤔", "👍", "🙏", "❤️", "🔥", "🎉", "😭", "😮", "😅", "😴", "🤝", "💯", "👀", "🥳", "✨"];
@@ -59,11 +59,18 @@ export function ChatApp({ currentUser, initialConversations }: { currentUser: Us
   const [showAdd, setShowAdd] = useState(false);
   const [showEmoji, setShowEmoji] = useState(false);
   const [peerTyping, setPeerTyping] = useState(false);
+  const [selectedMessage, setSelectedMessage] = useState<Message | null>(null);
+  const [replyingTo, setReplyingTo] = useState<Message | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editingText, setEditingText] = useState("");
   const mainRef = useRef<HTMLElement>(null);
   const messageAreaRef = useRef<HTMLElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const editTextareaRef = useRef<HTMLTextAreaElement>(null);
   const nearBottomRef = useRef(true);
   const prevActiveIdRef = useRef<string | null>(null);
+  const messagesRef = useRef<Message[]>([]);
+  const refreshTimer = useRef<number | undefined>(undefined);
   const activeRef = useRef<Conversation | null>(null);
   const typingChannel = useRef<any>(null);
   const typingResetTimer = useRef<number | undefined>(undefined);
@@ -89,12 +96,27 @@ export function ChatApp({ currentUser, initialConversations }: { currentUser: Us
     if (data) setConversations(data as Conversation[]);
   }, [supabase]);
 
+  // Debounce sidebar refreshes so bulk UPDATE events (e.g. read receipt marks)
+  // don't fire one RPC per row.
+  const debouncedRefresh = useCallback(() => {
+    window.clearTimeout(refreshTimer.current);
+    refreshTimer.current = window.setTimeout(() => void refreshConversations(), 400);
+  }, [refreshConversations]);
+
+  useEffect(() => () => window.clearTimeout(refreshTimer.current), []);
+
+  useEffect(() => { messagesRef.current = messages; }, [messages]);
+
   const openConversation = useCallback(async (conversation: Conversation) => {
     setActive(conversation);
     setMessages([]);
     setPeerTyping(false);
     setShowEmoji(false);
-    const { data } = await supabase.from("messages").select("id, conversation_id, sender_id, content, created_at, read_at").eq("conversation_id", conversation.conversation_id).order("created_at", { ascending: true });
+    setSelectedMessage(null);
+    setReplyingTo(null);
+    setEditingId(null);
+    setEditingText("");
+    const { data } = await supabase.from("messages").select("id, conversation_id, sender_id, content, created_at, read_at, reply_to_id, edited_at").eq("conversation_id", conversation.conversation_id).order("created_at", { ascending: true });
     setMessages((data ?? []) as Message[]);
     await supabase.rpc("mark_conversation_read", { p_conversation_id: conversation.conversation_id });
     setConversations(prev => prev.map(x => x.conversation_id === conversation.conversation_id ? { ...x, unread_count: 0 } : x));
@@ -142,9 +164,18 @@ export function ChatApp({ currentUser, initialConversations }: { currentUser: Us
         }
         void refreshConversations();
       })
+      .on("postgres_changes", { event: "UPDATE", schema: "public", table: "messages" }, payload => {
+        const updated = payload.new as Message;
+        const previous = messagesRef.current.find(m => m.id === updated.id);
+        const contentChanged = !previous || previous.content !== updated.content || (previous.edited_at ?? null) !== (updated.edited_at ?? null);
+        setMessages(prev => prev.map(m => m.id === updated.id
+          ? { ...m, content: updated.content, read_at: updated.read_at ?? null, edited_at: updated.edited_at ?? null }
+          : m));
+        if (contentChanged) debouncedRefresh();
+      })
       .subscribe();
     return () => { void supabase.removeChannel(channel); };
-  }, [currentUser.id, refreshConversations, supabase]);
+  }, [currentUser.id, refreshConversations, debouncedRefresh, supabase]);
 
   // Typing indicator via Realtime Broadcast — no schema changes needed.
   useEffect(() => {
@@ -236,11 +267,62 @@ export function ChatApp({ currentUser, initialConversations }: { currentUser: Us
     if (textareaRef.current) textareaRef.current.style.height = "auto";
     // Keep the field focused so the mobile keyboard never collapses mid-chat.
     requestAnimationFrame(() => textareaRef.current?.focus());
-    const { data, error } = await supabase.from("messages").insert({ conversation_id: active.conversation_id, sender_id: currentUser.id, content }).select("id, conversation_id, sender_id, content, created_at, read_at").single();
+    const { data, error } = await supabase.from("messages").insert({
+      conversation_id: active.conversation_id,
+      sender_id: currentUser.id,
+      content,
+      reply_to_id: replyingTo?.id ?? null,
+    }).select("id, conversation_id, sender_id, content, created_at, read_at, reply_to_id, edited_at").single();
     if (error) { setDraft(content); setSearchError(error.message); }
-    else if (data) { setMessages(prev => [...prev, data as Message]); void refreshConversations(); }
+    else if (data) { setMessages(prev => [...prev, data as Message]); setReplyingTo(null); void refreshConversations(); }
     requestAnimationFrame(() => textareaRef.current?.focus());
     setSending(false);
+  }
+
+  function copyMessage() {
+    if (!selectedMessage) return;
+    void navigator.clipboard?.writeText(selectedMessage.content);
+    setSelectedMessage(null);
+  }
+
+  function startReply() {
+    if (!selectedMessage) return;
+    setReplyingTo(selectedMessage);
+    setSelectedMessage(null);
+    setShowEmoji(false);
+    requestAnimationFrame(() => textareaRef.current?.focus());
+  }
+
+  function startEdit() {
+    if (!selectedMessage || selectedMessage.sender_id !== currentUser.id) return;
+    setEditingId(selectedMessage.id);
+    setEditingText(selectedMessage.content);
+    setSelectedMessage(null);
+    setShowEmoji(false);
+    requestAnimationFrame(() => editTextareaRef.current?.focus());
+  }
+
+  function cancelEdit() {
+    setEditingId(null);
+    setEditingText("");
+    requestAnimationFrame(() => textareaRef.current?.focus());
+  }
+
+  async function saveEdit() {
+    const content = editingText.trim();
+    if (!editingId || !content) return;
+    const { data, error } = await supabase.from("messages")
+      .update({ content, edited_at: new Date().toISOString() })
+      .eq("id", editingId)
+      .select("id, conversation_id, sender_id, content, created_at, read_at, reply_to_id, edited_at")
+      .single();
+    if (!error && data) {
+      setMessages(prev => prev.map(m => m.id === data.id ? (data as Message) : m));
+      void refreshConversations();
+    }
+    setEditingId(null);
+    setEditingText("");
+    requestAnimationFrame(() => textareaRef.current?.focus());
   }
 
   async function logout() {
@@ -311,7 +393,7 @@ export function ChatApp({ currentUser, initialConversations }: { currentUser: Us
               </div>
             </header>
             <section className="message-area" ref={messageAreaRef}>
-              <div className="message-inner">
+              <div className="message-inner" onClick={e => { if (e.target === e.currentTarget) setSelectedMessage(null); }}>
                 {messages.map((m, i) => {
                   const mine = m.sender_id === currentUser.id;
                   const prev = messages[i - 1];
@@ -322,9 +404,23 @@ export function ChatApp({ currentUser, initialConversations }: { currentUser: Us
                     <Fragment key={m.id}>
                       {newDay && <div className="day-chip">{dayLabel(m.created_at)}</div>}
                       <div className={`message-row ${mine ? "out" : "in"}`}>
-                        <div className={`message-bubble ${tail ? (mine ? "tail-out" : "tail-in") : ""}`}>
+                        <div
+                          className={`message-bubble ${tail ? (mine ? "tail-out" : "tail-in") : ""} ${selectedMessage?.id === m.id ? "selected" : ""}`}
+                          onClick={() => setSelectedMessage(sel => sel?.id === m.id ? null : m)}
+                        >
+                          {m.reply_to_id && (() => {
+                            const quoted = messages.find(x => x.id === m.reply_to_id);
+                            if (!quoted) return null;
+                            return (
+                              <div className="message-reply">
+                                <span className="reply-owner">{quoted.sender_id === currentUser.id ? "You" : activePerson?.other_display_name}</span>
+                                <span className="reply-text">{quoted.content}</span>
+                              </div>
+                            );
+                          })()}
                           <div className="message-content">{m.content}</div>
                           <div className="message-meta">
+                            {m.edited_at && <span className="edited-mark">edited</span>}
                             {formatTime(m.created_at)}
                             {mine && (m.read_at ? <CheckCheck size={14} className="tick-read" /> : <Check size={14} />)}
                           </div>
@@ -338,31 +434,73 @@ export function ChatApp({ currentUser, initialConversations }: { currentUser: Us
                 )}
               </div>
             </section>
+            {selectedMessage && (
+              <div className="msg-actions">
+                <span className="msg-actions-label">{selectedMessage.sender_id === currentUser.id ? "Your message" : activePerson?.other_display_name}</span>
+                <button className="msg-action" onClick={copyMessage}><Copy size={15} /> Copy</button>
+                <button className="msg-action" onClick={startReply}><MessageCircle size={15} /> Reply</button>
+                {selectedMessage.sender_id === currentUser.id && (
+                  <button className="msg-action accent" onClick={startEdit}><Pencil size={15} /> Edit</button>
+                )}
+                <button className="msg-action" onClick={() => setSelectedMessage(null)} aria-label="Close actions"><X size={15} /></button>
+              </div>
+            )}
             <div className="composer">
-              {showEmoji && (
+              {showEmoji && !editingId && (
                 <div className="emoji-pop">
                   {EMOJIS.map(e => <button key={e} type="button" onClick={() => { setDraft(d => d + e); textareaRef.current?.focus(); }}>{e}</button>)}
                 </div>
               )}
-              <form className="composer-inner" onSubmit={e => { e.preventDefault(); void sendMessage(); }}>
-                <button type="button" className="icon-button" onClick={() => setShowEmoji(v => !v)} aria-label="Emoji" title="Emoji"><Smile size={24} /></button>
-                <div className="composer-bar">
-                  <textarea
-                    ref={textareaRef}
-                    className="composer-input"
-                    rows={1}
-                    value={draft}
-                    enterKeyHint="send"
-                    autoComplete="off"
-                    autoCapitalize="sentences"
-                    onChange={e => { setDraft(e.target.value); e.target.style.height = "auto"; e.target.style.height = `${Math.min(e.target.scrollHeight, 120)}px`; notifyTyping(); }}
-                    onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void sendMessage(); } }}
-                    placeholder="Type a message"
-                    maxLength={4000}
-                  />
+              {!editingId && replyingTo && (
+                <div className="reply-preview">
+                  <div className="reply-preview-copy">
+                    <span className="reply-owner">Replying to {replyingTo.sender_id === currentUser.id ? "yourself" : activePerson?.other_display_name}</span>
+                    <p>{replyingTo.content}</p>
+                  </div>
+                  <button type="button" className="icon-button" onClick={() => setReplyingTo(null)} aria-label="Cancel reply"><X size={16} /></button>
                 </div>
-                <button className="send" disabled={!draft.trim() || sending} aria-label="Send"><Send size={20} /></button>
-              </form>
+              )}
+              {editingId ? (
+                <form className="composer-inner" onSubmit={e => { e.preventDefault(); void saveEdit(); }}>
+                  <button type="button" className="icon-button" onClick={cancelEdit} aria-label="Cancel edit" title="Cancel editing"><X size={22} /></button>
+                  <div className="composer-bar">
+                    <textarea
+                      ref={editTextareaRef}
+                      className="composer-input"
+                      rows={1}
+                      value={editingText}
+                      enterKeyHint="done"
+                      autoCapitalize="sentences"
+                      onChange={e => { setEditingText(e.target.value); e.target.style.height = "auto"; e.target.style.height = `${Math.min(e.target.scrollHeight, 120)}px`; }}
+                      onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void saveEdit(); } }}
+                      placeholder="Edit message"
+                      maxLength={4000}
+                      autoFocus
+                    />
+                  </div>
+                  <button type="submit" className="send" disabled={!editingText.trim()} aria-label="Save edit"><Check size={20} /></button>
+                </form>
+              ) : (
+                <form className="composer-inner" onSubmit={e => { e.preventDefault(); void sendMessage(); }}>
+                  <button type="button" className="icon-button" onClick={() => setShowEmoji(v => !v)} aria-label="Emoji" title="Emoji"><Smile size={24} /></button>
+                  <div className="composer-bar">
+                    <textarea
+                      ref={textareaRef}
+                      className="composer-input"
+                      rows={1}
+                      value={draft}
+                      enterKeyHint="send"
+                      autoComplete="off"
+                      autoCapitalize="sentences"
+                      onChange={e => { setDraft(e.target.value); e.target.style.height = "auto"; e.target.style.height = `${Math.min(e.target.scrollHeight, 120)}px`; notifyTyping(); }}
+                      onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void sendMessage(); } }}
+                      placeholder="Type a message"
+                      maxLength={4000}
+                    />
+                  </div>
+                  <button className="send" disabled={!draft.trim() || sending} aria-label="Send"><Send size={20} /></button>
+                </form>
+              )}
             </div>
           </>
         ) : (
